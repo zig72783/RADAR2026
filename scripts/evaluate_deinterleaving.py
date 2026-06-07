@@ -16,7 +16,7 @@ import torch
 from torch.utils.data import DataLoader, Dataset
 
 from src.evaluation.reconstruction import deinterleaving_metrics
-from src.models.model_unet import get_model
+from src.models import get_model
 
 
 class NPZDataset(Dataset):
@@ -57,8 +57,8 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
-def load_checkpoint(checkpoint_path: Path):
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+def load_checkpoint(checkpoint_path: Path, device: torch.device | None = None):
+    device = torch.device(device) if device is not None else torch.device("cuda" if torch.cuda.is_available() else "cpu")
     return torch.load(str(checkpoint_path), map_location=device)
 
 
@@ -77,12 +77,33 @@ def collect_paths(split: str) -> Dict[str, List[Path]]:
 
 
 def load_model(checkpoint_path: Path, device: torch.device):
-    ckpt = load_checkpoint(checkpoint_path)
-    model = get_model()
+    ckpt = load_checkpoint(checkpoint_path, device)
+    state_dict = ckpt["model_state_dict"] if isinstance(ckpt, dict) and "model_state_dict" in ckpt else ckpt
+    config = ckpt.get("config", {}) if isinstance(ckpt, dict) else {}
+
+    model_type = config.get("model_type", "unet")
+    in_channels = config.get("input_channels")
+
+    if in_channels is None:
+        # Infer input channels from the state dict if possible.
+        if "net.0.weight" in state_dict:
+            in_channels = int(state_dict["net.0.weight"].shape[1])
+        else:
+            for k in state_dict.keys():
+                if k.endswith("inc.net.0.weight"):
+                    try:
+                        in_channels = int(state_dict[k].shape[1])
+                        break
+                    except Exception:
+                        in_channels = None
+
+    if in_channels is None:
+        in_channels = 2
+
+    model = get_model(model_type=model_type, in_channels=in_channels)
     model.to(device)
     model.eval()
 
-    state_dict = ckpt["model_state_dict"] if isinstance(ckpt, dict) and "model_state_dict" in ckpt else ckpt
     model.load_state_dict(state_dict)
     return model
 
@@ -120,6 +141,24 @@ def evaluate_paths(model, device, file_paths, threshold, min_cluster_size, batch
     with torch.no_grad():
         for batch in loader:
             x = batch["x"].to(device)
+            expected_ch = None
+            try:
+                if hasattr(model, "inc") and hasattr(model.inc, "net"):
+                    first_conv = model.inc.net[0]
+                    expected_ch = getattr(first_conv, "in_channels", None)
+                if expected_ch is None and hasattr(model, "net"):
+                    first_conv = model.net[0] if isinstance(model.net, torch.nn.Sequential) else None
+                    expected_ch = getattr(first_conv, "in_channels", None)
+            except Exception:
+                expected_ch = None
+
+            if expected_ch is not None and x.shape[1] != expected_ch:
+                if x.shape[1] > expected_ch:
+                    x = x[:, :expected_ch, ...]
+                else:
+                    pad = torch.zeros((x.shape[0], expected_ch - x.shape[1], *x.shape[2:]), dtype=x.dtype, device=x.device)
+                    x = torch.cat([x, pad], dim=1)
+
             logits = model(x)
             valid_dm_mask = batch["valid_dm_mask"].cpu().numpy()
             pulse_labels = batch["pulse_labels"].cpu().numpy()

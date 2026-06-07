@@ -1,0 +1,2 @@
+split,files,cluster_purity,hungarian_accuracy,adjusted_rand_index,avg_predicted_clusters,avg_true_emitters
+test,5000,0.637253,0.575621,0.378584,4.314200,4.024600

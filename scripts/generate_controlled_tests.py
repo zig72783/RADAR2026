@@ -6,7 +6,12 @@ Run from project root:
     python scripts/generate_controlled_tests.py
 """
 
+import os
 import sys
+
+if sys.version_info[0] < 3:
+    os.execvp("python3", ["python3"] + sys.argv)
+
 from pathlib import Path
 
 ROOT_DIR = Path(__file__).resolve().parent.parent

@@ -5,6 +5,7 @@ from typing import Dict, List, Optional, Sequence
 
 import numpy as np
 import torch
+from scipy.optimize import linear_sum_assignment
 
 
 class UnionFind:
@@ -80,7 +81,8 @@ def affinity_to_clusters(
             f"valid_pulse_mask shape {valid_pulse_mask.shape} does not match num_pulses {num_pulses}"
         )
 
-    probabilities = 1.0 / (1.0 + np.exp(-affinity))
+    affinity_clipped = np.clip(affinity, -80.0, 80.0)
+    probabilities = 1.0 / (1.0 + np.exp(-affinity_clipped))
     uf = UnionFind(num_pulses)
 
     for pulse_idx in range(num_pulses):
@@ -90,12 +92,15 @@ def affinity_to_clusters(
             if probabilities[pulse_idx, lag_idx] <= threshold:
                 continue
 
-            prev_idx = pulse_idx - lag_idx
+            # DM column k corresponds to lag = k + 1, so the previous pulse is
+            # pulse_idx - (lag_idx + 1).
+            lag = lag_idx + 1
+            prev_idx = pulse_idx - lag
             if prev_idx < 0 or prev_idx >= num_pulses:
                 continue
-            if not valid_pulse_mask[pulse_idx] or not valid_pulse_mask[prev_idx]:
-                continue
             if pulse_idx == prev_idx:
+                continue
+            if not valid_pulse_mask[pulse_idx] or not valid_pulse_mask[prev_idx]:
                 continue
             uf.union(pulse_idx, prev_idx)
 
@@ -147,14 +152,7 @@ def _assignment_overlap_matrix(pred_labels: np.ndarray, true_labels: np.ndarray)
 
 
 def _solve_assignment(cost_matrix: np.ndarray) -> List[int]:
-    """Exact assignment solver for small matrices.
-
-    This uses exhaustive search over permutations of the row indices and is
-    suitable for the small number of predicted clusters encountered in this
-    dataset.
-    """
-
-    from itertools import permutations
+    """Solve the assignment problem with a polynomial-time optimizer."""
 
     if cost_matrix.shape[0] == 0:
         return []
@@ -165,15 +163,8 @@ def _solve_assignment(cost_matrix: np.ndarray) -> List[int]:
     if row_count > col_count:
         raise ValueError("Assignment search expects at most as many rows as columns")
 
-    best_assignment = None
-    best_score = None
-    for perm in permutations(range(col_count), row_count):
-        score = float(np.sum(cost_matrix[np.arange(row_count), perm]))
-        if best_score is None or score > best_score:
-            best_score = score
-            best_assignment = list(perm)
-
-    return best_assignment or []
+    row_idx, col_idx = linear_sum_assignment(-cost_matrix)
+    return [int(col) for col in col_idx]
 
 
 def hungarian_cluster_accuracy(pred_labels: Sequence[int], true_labels: Sequence[int]) -> float:

@@ -80,8 +80,8 @@ class UNet(nn.Module):
         return logits
 
 
-def get_model(base_channels: int = 32) -> UNet:
-    return UNet(in_channels=2, out_channels=1, base_channels=base_channels)
+def get_model(in_channels: int = 2, base_channels: int = 32) -> UNet:
+    return UNet(in_channels=in_channels, out_channels=1, base_channels=base_channels)
 
 
 if __name__ == "__main__":

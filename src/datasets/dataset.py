@@ -19,8 +19,12 @@ class RadarPulseDataset(Dataset):
         self,
         split: Split = "train",
         root: Optional[Path] = None,
+        input_channels: int = 2,
     ) -> None:
+        if input_channels not in (1, 2):
+            raise ValueError("input_channels must be 1 or 2")
         self.split = split
+        self.input_channels = input_channels
         self.root = Path(root) if root is not None else DATA_ROOT
         self.train_dir = self.root / "train"
         self.val_dir = self.root / "val"
@@ -63,13 +67,15 @@ class RadarPulseDataset(Dataset):
             affinity_mask = torch.from_numpy(data["affinity_mask"]).to(torch.float32)
             valid_dm_mask = torch.from_numpy(data["valid_dm_mask"]).to(torch.bool)
             toa_us = torch.from_numpy(data["toa_us"]).to(torch.float32)
+            valid_pulse_mask = torch.from_numpy(data["valid_pulse_mask"]).to(torch.bool)
             pulse_labels = torch.from_numpy(data["pulse_labels"]).to(torch.long)
 
         return {
-            "x": model_input,
+            "x": model_input[: self.input_channels],
             "y": affinity_mask.unsqueeze(0),
             "valid_mask": valid_dm_mask.unsqueeze(0),
             "toa_us": toa_us,
+            "valid_pulse_mask": valid_pulse_mask,
             "pulse_labels": pulse_labels,
             "path": str(path),
         }

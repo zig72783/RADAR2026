@@ -6,7 +6,12 @@ Run from project root:
     python scripts/generate_small_dataset.py
 """
 
+import os
 import sys
+
+if sys.version_info[0] < 3:
+    os.execvp("python3", ["python3"] + sys.argv)
+
 from pathlib import Path
 
 ROOT_DIR = Path(__file__).resolve().parent.parent
@@ -16,7 +21,7 @@ from src.data.dataset_writer import DatasetWriter
 from src.data.config import ensure_data_dirs, TRAIN_DIR
 
 
-def main() -> None:
+def main():
     ensure_data_dirs()
 
     writer = DatasetWriter()

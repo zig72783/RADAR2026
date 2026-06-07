@@ -15,7 +15,7 @@ import torch
 from torch.utils.data import DataLoader, Dataset
 
 from src.datasets.dataset import RadarPulseDataset
-from src.models.model_unet import get_model
+from src.models import get_model
 from src.training.losses import combined_bce_dice_loss
 from src.training.metrics import masked_binary_metrics
 
@@ -23,8 +23,11 @@ from src.training.metrics import masked_binary_metrics
 class NPZDataset(Dataset):
     """Dataset backed by an explicit list of .npz files."""
 
-    def __init__(self, file_paths):
+    def __init__(self, file_paths, input_channels: int = 2):
+        if input_channels not in (1, 2):
+            raise ValueError("input_channels must be 1 or 2")
         self.file_paths = sorted(file_paths)
+        self.input_channels = input_channels
 
     def __len__(self) -> int:
         return len(self.file_paths)
@@ -35,11 +38,15 @@ class NPZDataset(Dataset):
             model_input = torch.from_numpy(data["model_input"]).to(torch.float32)
             affinity_mask = torch.from_numpy(data["affinity_mask"]).to(torch.float32)
             valid_dm_mask = torch.from_numpy(data["valid_dm_mask"]).to(torch.bool)
+            toa_us = torch.from_numpy(data["toa_us"]).to(torch.float32)
+            valid_pulse_mask = torch.from_numpy(data["valid_pulse_mask"]).to(torch.bool)
 
         return {
-            "x": model_input,
+            "x": model_input[: self.input_channels],
             "y": affinity_mask.unsqueeze(0),
             "valid_mask": valid_dm_mask.unsqueeze(0),
+            "toa_us": toa_us,
+            "valid_pulse_mask": valid_pulse_mask,
         }
 
 
@@ -50,6 +57,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--threshold", type=float, default=0.5, help="Threshold for binary metrics")
     parser.add_argument("--batch-size", type=int, default=16, help="Batch size for evaluation")
     parser.add_argument("--device", type=str, default=None, help="Device override (e.g. cuda, cpu)")
+    parser.add_argument("--model-type", type=str, default=None, choices=("unet", "shallow_cnn", "bilstm_affinity"), help="Model type override for evaluation")
+    parser.add_argument("--input-mode", type=str, default=None, choices=("two_channel", "dm_only"), help="Input mode override for evaluation")
+    parser.add_argument("--input-channels", type=int, default=None, choices=[1, 2], help="Number of input channels for the model and dataset")
     return parser.parse_args()
 
 
@@ -59,7 +69,7 @@ def load_checkpoint(checkpoint_path: Path):
     return ckpt
 
 
-def evaluate_loader(model, loader, device, pos_weight, threshold):
+def evaluate_loader(model, loader, device, pos_weight, threshold, model_type: str | None = None):
     total_loss = 0.0
     total_precision = 0.0
     total_recall = 0.0
@@ -75,7 +85,13 @@ def evaluate_loader(model, loader, device, pos_weight, threshold):
             y = batch["y"].to(device)
             valid_mask = batch["valid_mask"].to(device)
 
-            logits = model(x)
+            if model_type == "bilstm_affinity":
+                toa_us = batch["toa_us"].to(device)
+                valid_pulse_mask = batch["valid_pulse_mask"].to(device)
+                logits = model(toa_us=toa_us, valid_pulse_mask=valid_pulse_mask)
+            else:
+                logits = model(x)
+
             loss_dict = combined_bce_dice_loss(logits, y, valid_mask, pos_weight=pos_weight)
             metrics = masked_binary_metrics(logits, y, valid_mask, threshold=threshold)
 
@@ -102,10 +118,10 @@ def evaluate_loader(model, loader, device, pos_weight, threshold):
     }
 
 
-def evaluate_standard_split(model, split, device, pos_weight, threshold, batch_size, checkpoint_path):
-    dataset = RadarPulseDataset(split=split)
+def evaluate_standard_split(model, split, device, pos_weight, threshold, batch_size, checkpoint_path, in_channels=2, model_type: str | None = None):
+    dataset = RadarPulseDataset(split=split, input_channels=in_channels)
     loader = DataLoader(dataset, batch_size=batch_size, shuffle=False, num_workers=0)
-    metrics = evaluate_loader(model, loader, device, pos_weight, threshold)
+    metrics = evaluate_loader(model, loader, device, pos_weight, threshold, model_type=model_type)
 
     print(f"checkpoint={checkpoint_path}")
     print(f"split={split}")
@@ -119,7 +135,7 @@ def evaluate_standard_split(model, split, device, pos_weight, threshold, batch_s
     print(f"positive_ratio_target={metrics['positive_ratio_target']:.6f}")
 
 
-def evaluate_controlled(model, device, pos_weight, threshold, batch_size):
+def evaluate_controlled(model, device, pos_weight, threshold, batch_size, in_channels=2, model_type: str | None = None):
     controlled_root = ROOT_DIR / "data" / "controlled_tests"
     settings = sorted([p for p in controlled_root.iterdir() if p.is_dir()])
 
@@ -130,12 +146,12 @@ def evaluate_controlled(model, device, pos_weight, threshold, batch_size):
             continue
 
         loader = DataLoader(
-            NPZDataset(file_paths),
+            NPZDataset(file_paths, input_channels=in_channels),
             batch_size=batch_size,
             shuffle=False,
             num_workers=0,
         )
-        metrics = evaluate_loader(model, loader, device, pos_weight, threshold)
+        metrics = evaluate_loader(model, loader, device, pos_weight, threshold, model_type=model_type)
         print(
             f"{setting_dir.name},"
             f"{metrics['loss']:.6f},"
@@ -160,16 +176,35 @@ def main() -> None:
     ckpt = load_checkpoint(checkpoint_path)
     config = ckpt.get("config", {}) if isinstance(ckpt, dict) else {}
     pos_weight = config.get("pos_weight", None)
+    checkpoint_input_mode = config.get("input_mode")
+    checkpoint_model_type = config.get("model_type")
 
-    model = get_model()
+    model_type = args.model_type or checkpoint_model_type or "unet"
+    input_mode = args.input_mode or checkpoint_input_mode or config.get("input_mode") or "two_channel"
+
+    if args.input_channels is not None:
+        in_channels = args.input_channels
+    elif input_mode == "dm_only":
+        in_channels = 1
+    elif input_mode == "two_channel":
+        in_channels = 2
+    else:
+        in_channels = config.get("input_channels", 2)
+
+    model = get_model(model_type=model_type, in_channels=in_channels)
     model.to(device)
     model.eval()
+
+    print(f"checkpoint={checkpoint_path}")
+    print(f"model_type={model_type}")
+    print(f"input_mode={input_mode}")
+    print(f"input_channels={in_channels}")
 
     state_dict = ckpt["model_state_dict"] if isinstance(ckpt, dict) and "model_state_dict" in ckpt else ckpt
     model.load_state_dict(state_dict)
 
     if args.split == "controlled":
-        evaluate_controlled(model, device, pos_weight, args.threshold, args.batch_size)
+        evaluate_controlled(model, device, pos_weight, args.threshold, args.batch_size, in_channels=in_channels, model_type=model_type)
     else:
         evaluate_standard_split(
             model,
@@ -179,6 +214,8 @@ def main() -> None:
             args.threshold,
             args.batch_size,
             checkpoint_path,
+            in_channels=in_channels,
+            model_type=model_type,
         )
 
 

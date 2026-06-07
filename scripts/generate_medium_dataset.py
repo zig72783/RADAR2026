@@ -1,14 +1,9 @@
 """
-Generate the full standard dataset for RADAR2026.
-
-This creates:
-    train: 40,000 samples
-    val: 5,000 samples
-    test: 5,000 samples
+Generate a medium-scale RADAR2026 dataset for pilot training.
 
 Run from project root:
 
-    python scripts/generate_full_dataset.py
+    python3 scripts/generate_medium_dataset.py
 """
 
 import os
@@ -27,7 +22,11 @@ from src.data.dataset_writer import DatasetWriter
 
 def main() -> None:
     writer = DatasetWriter()
-    writer.generate_standard_dataset()
+    writer.generate_standard_dataset(
+        train_samples=5000,
+        val_samples=1000,
+        test_samples=1000,
+    )
 
 
 if __name__ == "__main__":
